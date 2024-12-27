@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Streaming Webcam</title>
+</head>
+<body>
+  <h1>Streaming desde Webcam</h1>
+
+  <!-- Elemento de video para mostrar el stream -->
+  <video id="localVideo" autoplay muted playsinline></video>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io('http://localhost:3000');
+    let localStream;
+
+    // Solicitar permisos para inicializar correctamente los dispositivos
+    async function requestPermissions() {
+      try {
+        await navigator.mediaDevices.getUserMedia({ video: true });
+        console.log('Permisos de cámara otorgados.');
+      } catch (err) {
+        console.error('Error al solicitar permisos:', err);
+        alert('No se pudo acceder a la cámara. Por favor, otorga permisos.');
+        throw err;
+      }
+    }
+
+    // Función para obtener y seleccionar la cámara específica
+    async function getTargetCamera() {
+      try {
+        // Enumerar dispositivos disponibles
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        console.log('Dispositivos encontrados:', devices);
+
+        // Filtrar cámaras y seleccionar el primer dispositivo de video
+        const videoDevices = devices.filter((device) => device.kind === 'videoinput');
+
+        if (videoDevices.length === 0) {
+          alert('No se encontraron cámaras disponibles.');
+          throw new Error('Cámara no encontrada');
+        }
+
+        // Seleccionar el primer dispositivo de video disponible
+        const targetDevice = videoDevices[0].deviceId;
+        console.log('Usando dispositivo:', targetDevice);
+        return targetDevice;
+      } catch (err) {
+        console.error('Error al obtener la cámara:', err);
+        throw err;
+      }
+    }
+
+    // Función para iniciar el stream desde la cámara específica
+    async function startStream(deviceId) {
+      try {
+        // Detener el stream actual si existe
+        if (localStream) {
+          localStream.getTracks().forEach((track) => track.stop());
+        }
+
+        // Intentar acceder a la cámara seleccionada
+        localStream = await navigator.mediaDevices.getUserMedia({
+          video: { deviceId: { exact: deviceId } },
+          audio: false,
+        });
+
+        // Mostrar el stream en el elemento de video
+        const localVideo = document.getElementById('localVideo');
+        localVideo.srcObject = localStream;
+
+        // Comunicar capacidades del router al servidor
+        socket.emit('getRouterRtpCapabilities', {}, async (routerRtpCapabilities) => {
+          console.log('Router RTP Capabilities:', routerRtpCapabilities);
+        });
+      } catch (err) {
+        console.error('Error al iniciar el stream:', err);
+
+        // Manejar errores específicos
+        if (err.name === 'NotAllowedError') {
+          alert('Acceso denegado a la cámara. Por favor, verifica los permisos del navegador.');
+        } else if (err.name === 'NotFoundError') {
+          alert('No se encontró la cámara seleccionada. Asegúrate de que está conectada.');
+        } else if (err.name === 'OverconstrainedError') {
+          alert('Las restricciones de video no se pueden cumplir. Intenta con otra cámara o configuración.');
+        } else if (err.name === 'NotReadableError') {
+          alert('La cámara está en uso por otra aplicación. Por favor, cierra otras aplicaciones que puedan estar usando la cámara.');
+        } else {
+          alert(`Error desconocido: ${err.name} - ${err.message}`);
+        }
+      }
+    }
+
+    // Inicializar la aplicación
+    async function init() {
+      try {
+        await requestPermissions(); // Solicitar permisos
+        const targetDeviceId = await getTargetCamera(); // Obtener cámara
+        await startStream(targetDeviceId); // Iniciar stream
+      } catch (err) {
+        console.error('No se pudo inicializar el stream:', err);
+      }
+    }
+
+    // Llamar a la función de inicialización
+    init();
+  </script>
+</body>
+</html>
+
+
+
