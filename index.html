@@ -3,112 +3,184 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Streaming Webcam</title>
+  <title>CamGuro</title>
 </head>
 <body>
-  <h1>Streaming desde Webcam</h1>
-
-  <!-- Elemento de video para mostrar el stream -->
+  <h1>CamGuro</h1>
   <video id="localVideo" autoplay muted playsinline></video>
+  <video id="remoteVideo" autoplay playsinline></video>
 
   <script src="/socket.io/socket.io.js"></script>
   <script>
     const socket = io('http://localhost:3000');
     let localStream;
+    let routerRtpCapabilities;
 
-    // Solicitar permisos para inicializar correctamente los dispositivos
+    // Solicitar permisos para cámara y micrófono
     async function requestPermissions() {
       try {
-        await navigator.mediaDevices.getUserMedia({ video: true });
-        console.log('Permisos de cámara otorgados.');
-      } catch (err) {
-        console.error('Error al solicitar permisos:', err);
-        alert('No se pudo acceder a la cámara. Por favor, otorga permisos.');
-        throw err;
-      }
-    }
-
-    // Función para obtener y seleccionar la cámara específica
-    async function getTargetCamera() {
-      try {
-        // Enumerar dispositivos disponibles
         const devices = await navigator.mediaDevices.enumerateDevices();
-        console.log('Dispositivos encontrados:', devices);
-
-        // Filtrar cámaras y seleccionar el primer dispositivo de video
         const videoDevices = devices.filter((device) => device.kind === 'videoinput');
+        const audioDevices = devices.filter((device) => device.kind === 'audioinput');
 
         if (videoDevices.length === 0) {
-          alert('No se encontraron cámaras disponibles.');
-          throw new Error('Cámara no encontrada');
+          throw new Error('No se encontraron cámaras disponibles.');
         }
 
-        // Seleccionar el primer dispositivo de video disponible
-        const targetDevice = videoDevices[0].deviceId;
-        console.log('Usando dispositivo:', targetDevice);
-        return targetDevice;
-      } catch (err) {
-        console.error('Error al obtener la cámara:', err);
-        throw err;
-      }
-    }
-
-    // Función para iniciar el stream desde la cámara específica
-    async function startStream(deviceId) {
-      try {
-        // Detener el stream actual si existe
-        if (localStream) {
-          localStream.getTracks().forEach((track) => track.stop());
+        if (audioDevices.length === 0) {
+          throw new Error('No se encontraron micrófonos disponibles.');
         }
 
-        // Intentar acceder a la cámara seleccionada
-        localStream = await navigator.mediaDevices.getUserMedia({
-          video: { deviceId: { exact: deviceId } },
-          audio: false,
-        });
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        console.log('Permisos de cámara y micrófono otorgados.');
+        console.log('Stream local obtenido:', localStream);
 
-        // Mostrar el stream en el elemento de video
         const localVideo = document.getElementById('localVideo');
         localVideo.srcObject = localStream;
 
-        // Comunicar capacidades del router al servidor
-        socket.emit('getRouterRtpCapabilities', {}, async (routerRtpCapabilities) => {
+      } catch (err) {
+        console.error('Error al solicitar permisos:', err);
+        alert('No se pudo acceder a la cámara y/o micrófono. Verifica los permisos.');
+        throw err;
+      }
+    }
+
+    // Iniciar transmisión y crear productores
+    async function startStream() {
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        console.log('Stream local obtenido:', localStream);
+
+        const localVideo = document.getElementById('localVideo');
+        localVideo.srcObject = localStream;
+
+        // Solicitar capacidades RTP del router
+        socket.emit('getRouterRtpCapabilities', {}, (capabilities) => {
+          routerRtpCapabilities = capabilities;
           console.log('Router RTP Capabilities:', routerRtpCapabilities);
+
+          // Crear productores para cada pista
+          localStream.getTracks().forEach((track) => {
+            const kind = track.kind;
+
+            // Buscar el codec correspondiente en las capacidades del router
+            const codec = routerRtpCapabilities.codecs.find(c => c.kind === kind);
+
+            if (!codec) {
+              console.error(`No se encontró un codec compatible para ${kind}.`);
+              return;
+            }
+
+            const rtpParameters = {
+              codecs: [
+                {
+                  mimeType: codec.mimeType,
+                  payloadType: codec.preferredPayloadType,
+                  clockRate: codec.clockRate,
+                  channels: codec.channels || 1,
+                  parameters: codec.parameters || {},
+                },
+              ],
+              headerExtensions: routerRtpCapabilities.headerExtensions.map(ext => ({
+                uri: ext.uri,
+                id: ext.preferredId,
+              })),
+              encodings: [{ ssrc: Math.floor(Math.random() * 1000000000) }],
+            };
+
+            console.log(`rtpParameters para ${kind}:`, rtpParameters);
+
+            socket.emit('createProducer', { kind, rtpParameters }, (response) => {
+              if (response.error) {
+                console.error(`Error al crear productor ${kind}:`, response.error);
+              } else {
+                console.log(`Productor ${kind} creado con ID:`, response.id);
+
+                // Crear consumidor para pruebas locales
+                createConsumer(response.id);
+              }
+            });
+          });
         });
       } catch (err) {
         console.error('Error al iniciar el stream:', err);
-
-        // Manejar errores específicos
-        if (err.name === 'NotAllowedError') {
-          alert('Acceso denegado a la cámara. Por favor, verifica los permisos del navegador.');
-        } else if (err.name === 'NotFoundError') {
-          alert('No se encontró la cámara seleccionada. Asegúrate de que está conectada.');
-        } else if (err.name === 'OverconstrainedError') {
-          alert('Las restricciones de video no se pueden cumplir. Intenta con otra cámara o configuración.');
-        } else if (err.name === 'NotReadableError') {
-          alert('La cámara está en uso por otra aplicación. Por favor, cierra otras aplicaciones que puedan estar usando la cámara.');
-        } else {
-          alert(`Error desconocido: ${err.name} - ${err.message}`);
-        }
       }
     }
+
+
+
+    // Crear consumidor
+    function createConsumer(producerId) {
+      if (!producerId) {
+        console.error('Producer ID no está definido al llamar a createConsumer.');
+        return;
+      }
+
+      socket.emit('createConsumer', { producerId }, async (response) => {
+        if (response.error) {
+          console.error('Error al crear consumidor:', response.error);
+          return;
+        }
+
+        console.log(`Consumidor creado con ID: ${response.id}, tipo: ${response.kind}`);
+
+        // Validar la pista recibida
+        if (!response.rtpParameters) {
+          console.error('No se han recibido parámetros RTP para el consumidor.');
+          return;
+        }
+
+        // Crear RTCPeerConnection para recibir la pista
+        const pc = new RTCPeerConnection();
+        pc.addTransceiver(response.kind, { direction: 'recvonly' });
+
+        // Configurar SDP remoto
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        // Configurar el consumidor en base a la respuesta del servidor
+        pc.ontrack = (event) => {
+          const track = event.track;
+          console.log(`Pista ${response.kind} recibida:`, track);
+
+          if (response.kind === 'audio') {
+            const audioStream = new MediaStream();
+            audioStream.addTrack(track);
+
+            console.log('Pistas de audio en el stream remoto:', audioStream.getAudioTracks());
+
+            const remoteAudio = new Audio();
+            remoteAudio.srcObject = audioStream;
+            remoteAudio.muted = false; // Asegúrate de que no esté silenciado
+            remoteAudio.volume = 1.0; // Configura el volumen al máximo
+
+            document.body.addEventListener('click', () => {
+              remoteAudio.play().then(() => {
+                console.log('Audio activado tras la interacción del usuario.');
+              }).catch((err) => {
+                console.error('Error al reproducir audio tras la interacción del usuario:', err);
+              });
+            });
+          } else if (response.kind === 'video') {
+            const remoteVideo = document.getElementById('remoteVideo');
+            const videoStream = new MediaStream();
+            videoStream.addTrack(track);
+            remoteVideo.srcObject = videoStream;
+          }
+        };
+      });
+    }
+
 
     // Inicializar la aplicación
-    async function init() {
+    document.addEventListener('DOMContentLoaded', async () => {
       try {
-        await requestPermissions(); // Solicitar permisos
-        const targetDeviceId = await getTargetCamera(); // Obtener cámara
-        await startStream(targetDeviceId); // Iniciar stream
+        await requestPermissions();
+        await startStream();
       } catch (err) {
-        console.error('No se pudo inicializar el stream:', err);
+        console.error('Error en la inicialización:', err);
       }
-    }
-
-    // Llamar a la función de inicialización
-    init();
+    });
   </script>
 </body>
 </html>
-
-
-
